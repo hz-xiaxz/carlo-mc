@@ -7,7 +7,7 @@ repository = "https://github.com/hz-xiaxz/carlo-mc"
 license = "MIT"
 keywords = ["monte-carlo", "simulation", "checkpoint", "statistics", "reproducibility"]
 categories = ["science", "simulation"]
-include = ["Cargo.toml", "src/lib.rs", "LICENSE"]
+include = ["Cargo.toml", "src/lib.rs", "src/job.rs", "src/job/model.rs", "src/job/simulation.rs", "src/job/checkpoint.rs", "src/job/runner.rs", "src/job/results.rs", "src/job/paths.rs", "LICENSE"]
 
 [dependencies]
 hdf5-pure = "0.34.0"
