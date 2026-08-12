@@ -1,4 +1,5 @@
 mod checkpoint;
+pub mod config;
 pub mod model;
 mod paths;
 mod results;
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::{error::Error, fmt, marker::PhantomData};
 
 pub use checkpoint::*;
+pub use config::*;
 pub use model::{MonteCarlo, Task, TaskMaker};
 pub use paths::*;
 pub use results::*;

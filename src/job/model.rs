@@ -155,6 +155,20 @@ pub trait MonteCarlo: Sized + Serialize + DeserializeOwned {
     fn sweep(&mut self, context: &mut Context) -> Result<(), Self::Error>;
     /// Records observables, typically via [`Context::measure`].
     fn measure(&mut self, context: &mut Context) -> Result<(), Self::Error>;
+
+    /// Expands a configuration table into the model's task grid.
+    ///
+    /// This is the generic config-to-task hook. Models with a parameter-grid
+    /// convention override it to describe how their [`Self::Parameters`] are
+    /// derived from a [`Params`](crate::Params) dictionary (for example,
+    /// sweeping over lattice sizes, temperatures, and disorder samples).
+    /// The returned tasks can be passed directly to [`Job::new`](crate::Job::new).
+    ///
+    /// The default implementation returns an empty grid; models without a
+    /// config-driven grid can rely on [`TaskMaker`] instead.
+    fn build_tasks(_config: &crate::Params) -> Result<Vec<Task<Self::Parameters>>, Self::Error> {
+        Ok(Vec::new())
+    }
 }
 #[cfg(test)]
 mod tests {

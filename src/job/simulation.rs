@@ -181,6 +181,22 @@ impl Context {
         }
         Ok(())
     }
+
+    /// Returns the completed internal bins recorded for `name`, if any.
+    ///
+    /// These are the raw bin averages before rebinning; they are useful for
+    /// models that want to export or post-process samples themselves (for
+    /// example, to compute jackknife errors over nonlinear observables).
+    pub fn raw_bins(&self, name: &str) -> Option<&[f64]> {
+        self.observables
+            .get(name)
+            .map(|a| a.internal_bins.as_slice())
+    }
+
+    /// Returns the fixed bin size (samples per internal bin) for `name`, if any.
+    pub fn bin_length(&self, name: &str) -> Option<usize> {
+        self.observables.get(name).map(|a| a.binsize)
+    }
 }
 
 pub(crate) struct TaskRuntime<'a> {

@@ -69,6 +69,8 @@
 //! - [`Context`] owns the deterministic RNG and observable accumulators.
 //! - [`Runner`] executes tasks, writes HDF5 checkpoints, and can resume them.
 //! - [`JobResult`] can be serialized (JSON or HDF5) and merged across ranks.
+//! - [`Params`] is a generic TOML config table, consumed by
+//!   [`MonteCarlo::build_tasks`] to expand a model's parameter grid.
 //!
 //! ## Scheduling
 //!
@@ -89,7 +91,7 @@ pub mod prelude {
         merge_dynamic_results_to_hdf5, merge_dynamic_results_to_json, merge_results,
         merge_results_to_hdf5, merge_results_to_json, merge_results_with_scheduling, result_path,
         task_path, Context, DeterministicRng, GenericJobError, Job, JobAssignment, MonteCarlo,
-        RunOptions, RunResult, Runner, RunnerDurationConfig, ScalarEstimate, Scheduling, Task,
-        TaskMaker, TaskResult,
+        Params, ParamsError, RunOptions, RunResult, Runner, RunnerDurationConfig, ScalarEstimate,
+        Scheduling, Task, TaskMaker, TaskResult,
     };
 }
