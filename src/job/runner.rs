@@ -17,24 +17,41 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
+/// Per-run configuration passed to [`Runner::run`].
+///
+/// This can be constructed with `RunOptions::default()` and then customized, or built
+/// entirely with struct-literal syntax.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RunOptions {
+    /// Rank assignment. Defaults to single-rank (`rank 0 / world_size 1`).
     pub assignment: Option<JobAssignment>,
+    /// Directory for checkpoints and (in dynamic scheduling) task claims.
     pub checkpoint_dir: Option<PathBuf>,
+    /// Resume from an existing checkpoint when present.
     pub resume: bool,
+    /// Write a checkpoint every `checkpoint_interval` completed sweeps.
     pub checkpoint_interval: usize,
+    /// Where to write this rank's [`JobResult`]; `.h5` (or the canonical `result` path)
+    /// selects HDF5, anything else selects JSON.
     pub output_path: Option<PathBuf>,
+    /// Maximum number of sweeps to perform in this run. Useful for time-slicing.
     pub sweep_limit: Option<usize>,
     /// Wall-clock limit for this run. `Some` overrides the `Runner` default.
     pub deadline: Option<Duration>,
     /// Wall-clock checkpoint interval for this run. `Some` overrides the `Runner` default.
     pub checkpoint_interval_time: Option<Duration>,
 }
+/// The result of a single [`Runner::run`] invocation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RunResult<P> {
+    /// The per-rank result for this run.
     pub result: JobResult<P>,
+    /// The output path that was written, if any.
     pub output_path: Option<PathBuf>,
+    /// Checkpoint files written during this run.
     pub checkpoint_paths: Vec<PathBuf>,
+    /// Whether the run stopped before completing every assigned task
+    /// (e.g. due to `sweep_limit` or `deadline`).
     pub stopped_early: bool,
 }
 #[derive(Debug)]
@@ -141,9 +158,12 @@ impl Error for GenericJobError {
         }
     }
 }
+/// Task-to-rank assignment strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scheduling {
+    /// Task `i` is owned by rank `i % world_size`.
     Static,
+    /// Tasks are claimed dynamically via filesystem leases; any rank may run any task.
     Dynamic,
 }
 const DONE_SCHEMA_VERSION: u32 = 1;
@@ -183,9 +203,12 @@ struct OwnedClaim {
     path: PathBuf,
 }
 
+/// Default wall-clock settings for a [`Runner`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RunnerDurationConfig {
+    /// Stop once this much wall-clock time has elapsed.
     pub deadline: Option<Duration>,
+    /// Write checkpoints at least this often, in wall-clock time.
     pub checkpoint_interval: Option<Duration>,
 }
 
@@ -202,6 +225,7 @@ impl<M: MonteCarlo> Default for Runner<M> {
     }
 }
 impl<M: MonteCarlo> Runner<M> {
+    /// Creates a runner with static scheduling and no deadline.
     pub fn new() -> Self {
         Self {
             stale_claim_after: Duration::from_secs(3600),
@@ -210,6 +234,9 @@ impl<M: MonteCarlo> Runner<M> {
             model: PhantomData,
         }
     }
+    /// Sets how long a dynamic-scheduling claim may go without a heartbeat before it is
+    /// considered stale and can be reclaimed.
+    #[must_use]
     pub fn stale_claim_after(mut self, d: Duration) -> Self {
         self.stale_claim_after = d;
         self
@@ -218,26 +245,40 @@ impl<M: MonteCarlo> Runner<M> {
         self.stale_claim_after = d;
         self
     }
+    /// Enables dynamic (lease-based) task scheduling.
+    #[must_use]
     pub fn dynamic(mut self) -> Self {
         self.scheduling = Scheduling::Dynamic;
         self
     }
+    /// Selects the task-to-rank assignment strategy.
+    #[must_use]
     pub fn scheduling(mut self, s: Scheduling) -> Self {
         self.scheduling = s;
         self
     }
+    /// Sets the default wall-clock deadline and checkpoint interval.
+    #[must_use]
     pub fn duration_config(mut self, config: RunnerDurationConfig) -> Self {
         self.duration_config = config;
         self
     }
+    /// Sets a default wall-clock deadline.
+    #[must_use]
     pub fn deadline(mut self, deadline: Duration) -> Self {
         self.duration_config.deadline = Some(deadline);
         self
     }
+    /// Sets a default wall-clock checkpoint interval.
+    #[must_use]
     pub fn checkpoint_every(mut self, interval: Duration) -> Self {
         self.duration_config.checkpoint_interval = Some(interval);
         self
     }
+    /// Runs this rank's share of `job` and returns its [`RunResult`].
+    ///
+    /// With `resume` enabled (or always for dynamic scheduling), an existing checkpoint for
+    /// a task is restored exactly, so interrupted runs continue without losing samples.
     pub fn run(
         &self,
         job: &Job<M>,
@@ -359,26 +400,23 @@ impl<M: MonteCarlo> Runner<M> {
         for i in dynamic_task_order(job.tasks.len(), assignment) {
             let task = &job.tasks[i];
             let done = done_path(d, i, 0);
-            match read_optional_safe(&done, "read done marker")? {
-                Some(payload) => {
-                    let marker: DoneMarker<M::Parameters> = serde_json::from_slice(&payload)
-                        .map_err(|_| GenericJobError::Schema {
-                            path: done.clone(),
-                            reason: "invalid done marker",
-                        })?;
-                    if marker.schema_version != DONE_SCHEMA_VERSION
-                        || marker.job_name != job.name
-                        || marker.task_index != i
-                        || marker.task != *task
-                    {
-                        return Err(GenericJobError::Schema {
-                            path: done,
-                            reason: "done marker does not match job or task",
-                        });
-                    }
-                    continue;
+            if let Some(payload) = read_optional_safe(&done, "read done marker")? {
+                let marker: DoneMarker<M::Parameters> =
+                    serde_json::from_slice(&payload).map_err(|_| GenericJobError::Schema {
+                        path: done.clone(),
+                        reason: "invalid done marker",
+                    })?;
+                if marker.schema_version != DONE_SCHEMA_VERSION
+                    || marker.job_name != job.name
+                    || marker.task_index != i
+                    || marker.task != *task
+                {
+                    return Err(GenericJobError::Schema {
+                        path: done,
+                        reason: "done marker does not match job or task",
+                    });
                 }
-                None => {}
+                continue;
             }
 
             let path = claim_path(d, i, 0);

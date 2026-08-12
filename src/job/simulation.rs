@@ -9,15 +9,24 @@ use rand::{SeedableRng, TryRng};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, convert::Infallible, path::Path, time::Instant};
 const GAMMA: u64 = 0x9E3779B97F4A7C15;
+/// A deterministic, seekable RNG used for reproducible runs.
+///
+/// It implements `rand::SeedableRng` and `rand::TryRng` (with an infallible error type), so
+/// it automatically gains `rand::Rng` and `rand::RngExt` methods such as
+/// `next_u64`, `random::<f64>()`, and `random_bool`. The internal counter can be inspected
+/// and rewound with [`DeterministicRng::position`] and [`DeterministicRng::set_position`],
+/// which is what makes checkpoint resume exact.
 #[derive(Debug, Clone)]
 pub struct DeterministicRng {
     seed: u64,
     draws: u128,
 }
 impl DeterministicRng {
+    /// Returns the number of u64 draws consumed so far.
     pub fn position(&self) -> u128 {
         self.draws
     }
+    /// Rewinds or fast-forwards the draw counter to an exact position.
     pub fn set_position(&mut self, position: u128) {
         self.draws = position;
     }
@@ -75,8 +84,14 @@ pub(crate) struct CompactAccumulator {
     pub total_count: usize,
     pub binsize: usize,
 }
+/// The execution context passed to every [`MonteCarlo`](crate::MonteCarlo) callback.
+///
+/// It owns the task's deterministic RNG (`context.rng`) and the observable accumulators.
+/// Models should draw random numbers from `context.rng` (never from a separate RNG) and
+/// record observables with [`Context::measure`] or [`Context::measure_with_binsize`].
 #[derive(Debug)]
 pub struct Context {
+    /// Deterministic RNG for this task.
     pub rng: DeterministicRng,
     pub(crate) thermalized: bool,
     binsize: usize,
@@ -104,12 +119,22 @@ impl Context {
         x.thermalized = t;
         x
     }
+    /// Whether the configured number of thermalization sweeps has completed.
     pub fn is_thermalized(&self) -> bool {
         self.thermalized
     }
+    /// Records one scalar sample for `n` using the task's default bin size.
+    ///
+    /// Samples are accumulated into internal bins; a completed internal bin contributes
+    /// one averaged value to the final estimate. The observable name must be non-empty and
+    /// the value finite.
     pub fn measure(&mut self, n: impl Into<String>, v: f64) -> Result<(), GenericJobError> {
         self.measure_with_binsize(n, v, self.binsize)
     }
+    /// Records one scalar sample for `n` using an explicit bin size.
+    ///
+    /// The bin size is fixed on first use for a given observable name; calling this again
+    /// with a different bin size for the same name is an error.
     pub fn measure_with_binsize(
         &mut self,
         n: impl Into<String>,

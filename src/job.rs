@@ -15,12 +15,20 @@ pub use results::*;
 pub use runner::*;
 pub use simulation::*;
 
+/// Identifies one rank among a set of cooperating ranks.
+///
+/// Static scheduling gives task `i` to the rank where `i % world_size == rank`.
+/// Construct it with [`JobAssignment::new`], [`JobAssignment::single`], or
+/// [`JobAssignment::from_env`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobAssignment {
+    /// This rank's zero-based index.
     pub rank: usize,
+    /// Total number of cooperating ranks.
     pub world_size: usize,
 }
 
+/// Error returned by [`JobAssignment::new`] when `rank` or `world_size` is invalid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AssignmentError {
     pub rank: usize,
@@ -37,6 +45,7 @@ impl fmt::Display for AssignmentError {
 }
 impl Error for AssignmentError {}
 impl JobAssignment {
+    /// Validates `rank` and `world_size` and returns an assignment.
     pub fn new(rank: usize, world_size: usize) -> Result<Self, AssignmentError> {
         if world_size == 0 || rank >= world_size {
             Err(AssignmentError { rank, world_size })
@@ -44,12 +53,16 @@ impl JobAssignment {
             Ok(Self { rank, world_size })
         }
     }
+    /// A single-rank assignment (`rank 0 / world_size 1`).
     pub fn single() -> Self {
         Self {
             rank: 0,
             world_size: 1,
         }
     }
+    /// Detects rank and world size from common MPI/SLURM environment variables.
+    ///
+    /// Falls back to single-rank when no variable is present.
     pub fn from_env() -> Result<Self, AssignmentError> {
         Self::new(
             env_any(&[
@@ -78,14 +91,21 @@ fn env_any(keys: &[&str]) -> Option<usize> {
         .find_map(|k| std::env::var(k).ok()?.parse().ok())
 }
 
+/// A named collection of [`Task`]s that together define a Monte Carlo job.
+///
+/// `Job` is shared by all ranks; each rank runs the subset selected by
+/// [`Job::selected_tasks`] under the chosen [`Scheduling`](crate::Scheduling).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Job<M: MonteCarlo> {
+    /// The job name, used as a key in checkpoints and results.
     pub name: String,
+    /// The list of tasks, one per parameter point.
     pub tasks: Vec<Task<M::Parameters>>,
     #[serde(skip)]
     model: PhantomData<fn() -> M>,
 }
 impl<M: MonteCarlo> Job<M> {
+    /// Creates a job from a name and a list of tasks.
     pub fn new(name: impl Into<String>, tasks: Vec<Task<M::Parameters>>) -> Self {
         Self {
             name: name.into(),
@@ -93,6 +113,8 @@ impl<M: MonteCarlo> Job<M> {
             model: PhantomData,
         }
     }
+    /// Iterates the `(task_index, task)` pairs owned by the given rank under static
+    /// scheduling.
     pub fn selected_tasks(
         &self,
         a: JobAssignment,

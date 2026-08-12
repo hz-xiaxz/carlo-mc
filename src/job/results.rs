@@ -15,16 +15,25 @@ use std::{
     path::Path,
 };
 const KIND: &str = "carlo-mc-result";
+/// A binned statistical estimate for one observable.
+///
+/// `mean` is the average of rebinned internal bins and `stderr` is the rebinned
+/// standard error. When only one rebinned bin exists, `stderr` is `NaN`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScalarEstimate {
     pub mean: f64,
     pub stderr: f64,
+    /// Number of raw internal bins before rebinning.
     pub internal_bins: usize,
+    /// Number of internal bins combined into one rebinned bin.
     pub rebin_length: usize,
+    /// Number of rebinned bins used for the estimate.
     pub rebin_count: usize,
+    /// Raw samples per internal bin.
     pub bin_length: usize,
 }
+/// The measured result of a single [`Task`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskResult<P> {
@@ -33,8 +42,10 @@ pub struct TaskResult<P> {
     pub observables: BTreeMap<String, ScalarEstimate>,
     pub thermalization_sweeps: usize,
     pub measurement_sweeps: usize,
+    /// Whether the task ran to completion (full thermalization and measurement).
     pub completed: bool,
 }
+/// One rank's contribution to a job, serializable to JSON or HDF5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct JobResult<P> {
@@ -44,6 +55,7 @@ pub struct JobResult<P> {
     pub tasks: Vec<TaskResult<P>>,
 }
 impl<P: Serialize + DeserializeOwned> JobResult<P> {
+    /// Atomically writes this result as pretty-printed JSON.
     pub fn write_json(&self, path: &Path) -> Result<(), GenericJobError> {
         validate_result_schema(path, self)?;
         let bytes =
@@ -51,6 +63,7 @@ impl<P: Serialize + DeserializeOwned> JobResult<P> {
         atomic_write(path, &bytes)
     }
 
+    /// Reads and validates a JSON result written by [`JobResult::write_json`].
     pub fn read_json(path: &Path) -> Result<Self, GenericJobError> {
         ensure_safe_read_file_path(path)?;
         let result: Self = serde_json::from_slice(
@@ -61,6 +74,7 @@ impl<P: Serialize + DeserializeOwned> JobResult<P> {
         Ok(result)
     }
 
+    /// Atomically writes this result as HDF5.
     pub fn write_hdf5(&self, path: &Path) -> Result<(), GenericJobError> {
         validate_result_schema(path, self)?;
         if self.tasks.len() > 10_000 {
@@ -146,6 +160,7 @@ impl<P: Serialize + DeserializeOwned> JobResult<P> {
         finish_hdf5(path, builder)
     }
 
+    /// Reads and validates an HDF5 result written by [`JobResult::write_hdf5`].
     pub fn read_hdf5(path: &Path) -> Result<Self, GenericJobError> {
         let file = open_hdf5(path, KIND)?;
         exact_root_group(path, file.root(), &[], &["assignment", "metadata", "tasks"])?;
@@ -349,6 +364,7 @@ fn validate_result_schema<P>(path: &Path, result: &JobResult<P>) -> Result<(), G
     }
     Ok(())
 }
+/// Merges per-rank results from static scheduling into a single result.
 pub fn merge_results<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,
@@ -356,6 +372,7 @@ pub fn merge_results<M: MonteCarlo>(
     merge_results_with_scheduling(job, parts, Scheduling::Static)
 }
 
+/// Merges per-rank results from dynamic scheduling into a single result.
 pub fn merge_dynamic_results<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,
@@ -363,6 +380,7 @@ pub fn merge_dynamic_results<M: MonteCarlo>(
     merge_results_with_scheduling(job, parts, Scheduling::Dynamic)
 }
 
+/// Merges static-scheduling results and atomically writes the output as JSON.
 pub fn merge_results_to_json<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,
@@ -377,6 +395,7 @@ pub fn merge_results_to_json<M: MonteCarlo>(
     )
 }
 
+/// Merges static-scheduling results and atomically writes the output as HDF5.
 pub fn merge_results_to_hdf5<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,
@@ -391,6 +410,7 @@ pub fn merge_results_to_hdf5<M: MonteCarlo>(
     )
 }
 
+/// Merges dynamic-scheduling results and atomically writes the output as JSON.
 pub fn merge_dynamic_results_to_json<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,
@@ -405,6 +425,7 @@ pub fn merge_dynamic_results_to_json<M: MonteCarlo>(
     )
 }
 
+/// Merges dynamic-scheduling results and atomically writes the output as HDF5.
 pub fn merge_dynamic_results_to_hdf5<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,
@@ -431,6 +452,10 @@ fn merge_results_to<M: MonteCarlo>(
     Ok(result)
 }
 
+/// Merges per-rank results under the given scheduling strategy.
+///
+/// Validates every part strictly: ranks must be unique and complete, and each task must
+/// be completed, correctly owned, and consistent with the shared `job` definition.
 pub fn merge_results_with_scheduling<M: MonteCarlo>(
     job: &Job<M>,
     parts: Vec<JobResult<M::Parameters>>,

@@ -73,6 +73,10 @@ fn create_unique_temporary_with(
     ))
 }
 
+/// Validates a single path component used as a file or directory name.
+///
+/// Rejects empty names, path separators, control characters, reserved Windows names,
+/// absolute paths, and anything that would make a path escape its intended root.
 pub fn validate_safe_component(value: &str) -> Result<(), GenericJobError> {
     let stem = value
         .split('.')
