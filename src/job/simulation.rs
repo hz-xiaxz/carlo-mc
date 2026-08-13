@@ -353,7 +353,7 @@ where
     maintain(&state, &model, used, true)?;
     let completed =
         thermalization_sweeps == task.thermalization && measurement_sweeps == task.sweeps;
-    let observables = if completed {
+    let (observables, measurement_bins) = if completed {
         for (name, accumulator) in &context.observables {
             if accumulator.internal_bins.is_empty() {
                 return Err(GenericJobError::InsufficientSamples {
@@ -372,9 +372,10 @@ where
             .iter()
             .map(|(name, accumulator)| (name.clone(), accumulator.binsize))
             .collect::<BTreeMap<_, _>>();
-        model.finalize_estimates(&task.parameters, &raw_bins, &bin_lengths)?
+        let estimates = model.finalize_estimates(&task.parameters, &raw_bins, &bin_lengths)?;
+        (estimates, raw_bins)
     } else {
-        BTreeMap::new()
+        (BTreeMap::new(), BTreeMap::new())
     };
     Ok((
         TaskResult {
@@ -384,6 +385,8 @@ where
             thermalization_sweeps,
             measurement_sweeps,
             completed,
+            metadata: model.task_metadata(),
+            measurement_bins,
         },
         used,
     ))

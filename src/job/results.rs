@@ -15,24 +15,6 @@ use std::{
     path::Path,
 };
 const KIND: &str = "carlo-mc-result";
-/// A binned statistical estimate for one observable.
-///
-/// `mean` is the average of rebinned internal bins and `stderr` is the rebinned
-/// standard error. When only one rebinned bin exists, `stderr` is `NaN`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ScalarEstimate {
-    pub mean: f64,
-    pub stderr: f64,
-    /// Number of raw internal bins before rebinning.
-    pub internal_bins: usize,
-    /// Number of internal bins combined into one rebinned bin.
-    pub rebin_length: usize,
-    /// Number of rebinned bins used for the estimate.
-    pub rebin_count: usize,
-    /// Raw samples per internal bin.
-    pub bin_length: usize,
-}
 /// The measured result of a single [`Task`].
 ///
 /// The estimate type `E` defaults to [`Estimate`] (a fully featured binned estimate with
@@ -48,6 +30,12 @@ pub struct TaskResult<P, E = Estimate> {
     pub measurement_sweeps: usize,
     /// Whether the task ran to completion (full thermalization and measurement).
     pub completed: bool,
+    /// Optional model-specific scalar metadata (for example an acceptance rate).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub metadata: BTreeMap<String, f64>,
+    /// Raw completed internal-bin averages per observable (for diagnostics/re-analysis).
+    #[serde(skip)]
+    pub measurement_bins: BTreeMap<String, Vec<f64>>,
 }
 /// One rank's contribution to a job, serializable to JSON or HDF5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -246,6 +234,8 @@ impl<P: Serialize + DeserializeOwned, E: ResultEstimate> JobResult<P, E> {
                     &format!("{base}/progress/measurement_sweeps"),
                 )?,
                 completed,
+                metadata: BTreeMap::new(),
+                measurement_bins: BTreeMap::new(),
             });
         }
         let result = Self {
@@ -259,15 +249,6 @@ impl<P: Serialize + DeserializeOwned, E: ResultEstimate> JobResult<P, E> {
     }
 }
 
-pub(crate) fn rebin_length(internal_bins: usize) -> usize {
-    let target_count = if internal_bins <= 10 {
-        internal_bins
-    } else {
-        10 + ((internal_bins - 10) as f64).cbrt().round() as usize
-    };
-    (internal_bins / target_count.max(1)).max(1)
-}
-
 fn parse_indexed_group(path: &Path, name: &str, prefix: &str) -> Result<usize, GenericJobError> {
     let digits = name
         .strip_prefix(prefix)
@@ -276,26 +257,6 @@ fn parse_indexed_group(path: &Path, name: &str, prefix: &str) -> Result<usize, G
     digits
         .parse::<usize>()
         .map_err(|_| schema(path, "invalid four-digit result group index"))
-}
-
-impl ResultEstimate for ScalarEstimate {
-    fn valid(&self) -> bool {
-        if !self.mean.is_finite()
-            || self.internal_bins == 0
-            || self.rebin_length == 0
-            || self.rebin_count == 0
-            || self.bin_length == 0
-            || self.rebin_length != rebin_length(self.internal_bins)
-            || self.rebin_count != self.internal_bins / self.rebin_length
-        {
-            return false;
-        }
-        if self.rebin_count == 1 {
-            self.stderr.is_nan()
-        } else {
-            self.stderr.is_finite() && self.stderr >= 0.0
-        }
-    }
 }
 
 fn validate_result_schema<P, E: ResultEstimate>(
@@ -511,6 +472,8 @@ mod tests {
             thermalization_sweeps,
             measurement_sweeps,
             completed: true,
+            metadata: BTreeMap::new(),
+            measurement_bins: BTreeMap::new(),
         }
     }
 
@@ -580,6 +543,8 @@ mod tests {
                 thermalization_sweeps: 2,
                 measurement_sweeps: 4,
                 completed: true,
+                metadata: BTreeMap::new(),
+                measurement_bins: BTreeMap::new(),
             }],
         };
         result.write_hdf5(&path).unwrap();

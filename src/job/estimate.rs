@@ -13,8 +13,6 @@
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use super::ScalarEstimate;
-
 /// The contract every per-observable estimate type stored in a
 /// [`TaskResult`](crate::TaskResult) must satisfy.
 ///
@@ -179,24 +177,6 @@ impl Estimate {
 impl From<&BinnedEstimate> for Estimate {
     fn from(estimate: &BinnedEstimate) -> Self {
         Self::from_binned(estimate, estimate.internal_bin_length)
-    }
-}
-
-impl From<ScalarEstimate> for Estimate {
-    /// Widens a plain rebinned [`ScalarEstimate`] into the rich estimate form.
-    fn from(estimate: ScalarEstimate) -> Self {
-        Self {
-            mean: estimate.mean,
-            stderr: estimate.stderr,
-            error: estimate.stderr,
-            covariance: None,
-            autocorr_time: 0.0,
-            bins: estimate.rebin_count,
-            bin_length: estimate.bin_length,
-            rebin_len: estimate.rebin_length,
-            rebin_count: estimate.rebin_count,
-            internal_bin_len: estimate.bin_length,
-        }
     }
 }
 

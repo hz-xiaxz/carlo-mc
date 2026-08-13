@@ -94,6 +94,6 @@ pub mod prelude {
         task_path, BinnedEstimate, CheckpointState, CompactAccumulator, Context, DeterministicRng,
         Estimate, Evaluator, GenericJobError, Job, JobAssignment, MonteCarlo, Params, ParamsError,
         RestoredState, ResultEstimate, RunOptions, RunResult, Runner, RunnerDurationConfig,
-        ScalarEstimate, Scheduling, Task, TaskMaker, TaskResult,
+        Scheduling, Task, TaskMaker, TaskResult,
     };
 }

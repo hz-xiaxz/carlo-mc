@@ -206,6 +206,12 @@ pub trait MonteCarlo: Sized + Serialize + DeserializeOwned {
             .collect())
     }
 
+    /// Returns optional model-specific scalar metadata for the completed task result
+    /// (for example an acceptance rate). The default is empty.
+    fn task_metadata(&self) -> BTreeMap<String, f64> {
+        BTreeMap::new()
+    }
+
     /// Writes a checkpoint for this model at `path`.
     ///
     /// `state` carries everything the runner owns (task, assignment, RNG position, sweep
