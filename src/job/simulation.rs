@@ -1,8 +1,5 @@
 use super::{
-    checkpoint::{
-        decode_rng_position, encode_rng_position, read_checkpoint, Checkpoint,
-        CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
-    },
+    checkpoint::{CheckpointState, RestoredState},
     GenericJobError, JobAssignment, MonteCarlo, Task, TaskResult,
 };
 use rand::{SeedableRng, TryRng};
@@ -241,51 +238,40 @@ pub(crate) fn run_task<M, F>(
 ) -> RunTaskResult<M>
 where
     M: MonteCarlo,
-    F: FnMut(&Checkpoint<M::Parameters>, usize, bool) -> Result<(), GenericJobError>,
+    F: FnMut(&CheckpointState<M::Parameters>, &M, usize, bool) -> Result<(), GenericJobError>,
 {
-    let restored: Option<Checkpoint<M::Parameters>> = runtime
+    let restored: Option<RestoredState<M>> = runtime
         .checkpoint_path
         .filter(|path| runtime.restore_checkpoint && path.exists())
-        .map(read_checkpoint)
+        .map(M::read_checkpoint)
         .transpose()?;
     let (mut model, mut context, mut thermalization_sweeps, mut measurement_sweeps) =
-        if let Some(checkpoint) = restored {
-            if checkpoint.schema_version != CHECKPOINT_PAYLOAD_SCHEMA_VERSION
-                || (!runtime.allow_different_rank && checkpoint.rank != runtime.assignment.rank)
-                || checkpoint.world_size != runtime.assignment.world_size
-                || checkpoint.world_size == 0
-                || checkpoint.rank >= checkpoint.world_size
-                || checkpoint.job_name != runtime.job_name
-                || checkpoint.task != *task
-                || checkpoint.task_index != runtime.task_index
-                || validate_checkpoint_state(task, &checkpoint).is_err()
+        if let Some(restored) = restored {
+            if (!runtime.allow_different_rank && restored.rank != runtime.assignment.rank)
+                || restored.world_size != runtime.assignment.world_size
+                || restored.world_size == 0
+                || restored.rank >= restored.world_size
+                || restored.job_name != runtime.job_name
+                || restored.task != *task
+                || restored.task_index != runtime.task_index
+                || validate_restored_state(task, &restored).is_err()
             {
                 return Err(GenericJobError::CheckpointMismatch {
                     path: runtime.checkpoint_path.unwrap().into(),
                     task: task.name.clone(),
                 });
             }
-            let model: M = serde_json::from_value(checkpoint.model.clone())
-                .map_err(|error| GenericJobError::json(runtime.checkpoint_path, error))?;
-            let restored_model = serde_json::to_value(&model)
-                .map_err(|error| GenericJobError::json(runtime.checkpoint_path, error))?;
-            if restored_model != checkpoint.model {
-                return Err(GenericJobError::CheckpointMismatch {
-                    path: runtime.checkpoint_path.unwrap().into(),
-                    task: task.name.clone(),
-                });
-            }
             (
-                model,
+                restored.model,
                 Context::restored(
                     task.seed,
-                    decode_rng_position(checkpoint.rng_position_words),
+                    restored.rng_position,
                     task.binsize,
-                    checkpoint.observables,
-                    checkpoint.thermalization_sweeps >= task.thermalization,
+                    restored.observables,
+                    restored.thermalization_sweeps >= task.thermalization,
                 ),
-                checkpoint.thermalization_sweeps,
-                checkpoint.measurement_sweeps,
+                restored.thermalization_sweeps,
+                restored.measurement_sweeps,
             )
         } else {
             let mut model = M::new(&task.parameters).map_err(|error| GenericJobError::Model {
@@ -317,15 +303,14 @@ where
             })?;
         thermalization_sweeps += 1;
         used += 1;
-        let checkpoint = make_checkpoint(
+        let state = make_checkpoint_state(
             &runtime,
             task,
-            &model,
             &context,
             thermalization_sweeps,
             measurement_sweeps,
-        )?;
-        maintain(&checkpoint, used, false)?;
+        );
+        maintain(&state, &model, used, false)?;
     }
     context.thermalized = thermalization_sweeps >= task.thermalization;
     while measurement_sweeps < task.sweeps
@@ -348,26 +333,24 @@ where
             })?;
         measurement_sweeps += 1;
         used += 1;
-        let checkpoint = make_checkpoint(
+        let state = make_checkpoint_state(
             &runtime,
             task,
-            &model,
             &context,
             thermalization_sweeps,
             measurement_sweeps,
-        )?;
-        maintain(&checkpoint, used, false)?;
+        );
+        maintain(&state, &model, used, false)?;
     }
 
-    let checkpoint = make_checkpoint(
+    let state = make_checkpoint_state(
         &runtime,
         task,
-        &model,
         &context,
         thermalization_sweeps,
         measurement_sweeps,
-    )?;
-    maintain(&checkpoint, used, true)?;
+    );
+    maintain(&state, &model, used, true)?;
     let completed =
         thermalization_sweeps == task.thermalization && measurement_sweeps == task.sweeps;
     let observables = if completed {
@@ -406,49 +389,45 @@ where
     ))
 }
 
-fn make_checkpoint<M: MonteCarlo>(
+fn make_checkpoint_state<P: Clone>(
     runtime: &TaskRuntime<'_>,
-    task: &Task<M::Parameters>,
-    model: &M,
+    task: &Task<P>,
     context: &Context,
     thermalization_sweeps: usize,
     measurement_sweeps: usize,
-) -> Result<Checkpoint<M::Parameters>, GenericJobError> {
-    Ok(Checkpoint {
-        schema_version: CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
+) -> CheckpointState<P> {
+    CheckpointState {
         rank: runtime.assignment.rank,
         world_size: runtime.assignment.world_size,
         job_name: runtime.job_name.into(),
         task: task.clone(),
         task_index: runtime.task_index,
-        model: serde_json::to_value(model).map_err(|error| GenericJobError::json(None, error))?,
-        rng_position_words: encode_rng_position(context.rng.position()),
+        rng_position: context.rng.position(),
         thermalization_sweeps,
         measurement_sweeps,
         observables: context.observables.clone(),
-    })
+    }
 }
 
-fn validate_checkpoint_state<P>(
-    task: &Task<P>,
-    checkpoint: &Checkpoint<P>,
+fn validate_restored_state<M: MonteCarlo>(
+    task: &Task<M::Parameters>,
+    restored: &RestoredState<M>,
 ) -> Result<(), &'static str> {
-    if checkpoint.thermalization_sweeps > task.thermalization
-        || checkpoint.measurement_sweeps > task.sweeps
+    if restored.thermalization_sweeps > task.thermalization
+        || restored.measurement_sweeps > task.sweeps
     {
         return Err("checkpoint sweep count exceeds task");
     }
-    if checkpoint.measurement_sweeps > 0 && checkpoint.thermalization_sweeps != task.thermalization
-    {
+    if restored.measurement_sweeps > 0 && restored.thermalization_sweeps != task.thermalization {
         return Err("checkpoint measured before thermalization completed");
     }
-    for (name, accumulator) in &checkpoint.observables {
+    for (name, accumulator) in &restored.observables {
         if name.is_empty() {
             return Err("checkpoint has an empty observable name");
         }
         if accumulator.binsize == 0
             || accumulator.pending_count >= accumulator.binsize
-            || accumulator.total_count > checkpoint.measurement_sweeps
+            || accumulator.total_count > restored.measurement_sweeps
         {
             return Err("checkpoint accumulator has invalid bin state");
         }

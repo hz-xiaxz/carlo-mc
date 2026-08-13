@@ -1,6 +1,6 @@
 use super::{
     paths::{atomic_write, dump_path, ensure_safe_read_file_path},
-    CompactAccumulator, GenericJobError, Task,
+    CompactAccumulator, GenericJobError, MonteCarlo, Task,
 };
 use hdf5_pure::{AttrValue, DType, File, FileBuilder, Group};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -27,6 +27,65 @@ pub(crate) struct Checkpoint<P> {
     pub rng_position_words: [u64; 2],
     pub thermalization_sweeps: usize,
     pub measurement_sweeps: usize,
+    pub observables: BTreeMap<String, CompactAccumulator>,
+}
+
+/// Framework-managed checkpoint state handed to [`MonteCarlo::write_checkpoint`].
+///
+/// This is the complete set of data the runner owns: the task being run, the assignment
+/// and job identity, the RNG position, the sweep progress, and the accumulated observable
+/// bins. A model's `write_checkpoint` implementation is responsible for persisting this
+/// (plus its own state, accessible through `&self`) in whatever on-disk format it wants.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckpointState<P> {
+    /// Rank that produced this checkpoint.
+    pub rank: usize,
+    /// Total number of cooperating ranks.
+    pub world_size: usize,
+    /// The job name.
+    pub job_name: String,
+    /// The task being run.
+    pub task: Task<P>,
+    /// Zero-based index of the task within the job.
+    pub task_index: usize,
+    /// The exact RNG draw counter position at the moment of this checkpoint.
+    pub rng_position: u128,
+    /// Completed thermalization sweeps.
+    pub thermalization_sweeps: usize,
+    /// Completed measurement sweeps.
+    pub measurement_sweeps: usize,
+    /// Accumulated observable bins.
+    pub observables: BTreeMap<String, CompactAccumulator>,
+}
+
+/// The state returned by [`MonteCarlo::read_checkpoint`], plus the restored model.
+///
+/// The runner validates the framework-managed fields (`rank`, `world_size`, `job_name`,
+/// `task`, `task_index`, and the sweep/observable invariants) against the run that is being
+/// resumed, then continues the sweep loop from `model` with the returned RNG position and
+/// accumulators.
+#[derive(Debug)]
+pub struct RestoredState<M: MonteCarlo> {
+    /// The restored model state.
+    pub model: M,
+    /// The task recorded in the checkpoint; must match the task being resumed.
+    pub task: Task<M::Parameters>,
+    /// Rank that produced this checkpoint.
+    pub rank: usize,
+    /// Total number of cooperating ranks.
+    pub world_size: usize,
+    /// The job name recorded in the checkpoint.
+    pub job_name: String,
+    /// Zero-based index of the task within the job.
+    pub task_index: usize,
+    /// The exact RNG draw counter position to resume from.
+    pub rng_position: u128,
+    /// Completed thermalization sweeps to resume from.
+    pub thermalization_sweeps: usize,
+    /// Completed measurement sweeps to resume from.
+    pub measurement_sweeps: usize,
+    /// Accumulated observable bins to resume from.
     pub observables: BTreeMap<String, CompactAccumulator>,
 }
 

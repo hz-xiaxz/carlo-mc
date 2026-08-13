@@ -91,9 +91,9 @@ pub mod prelude {
         checkpoint_path, dump_path, measurement_path, merge_dynamic_results,
         merge_dynamic_results_to_hdf5, merge_dynamic_results_to_json, merge_results,
         merge_results_to_hdf5, merge_results_to_json, merge_results_with_scheduling, result_path,
-        task_path, BinnedEstimate, CompactAccumulator, Context, DeterministicRng, Estimate,
-        Evaluator, GenericJobError, Job, JobAssignment, MonteCarlo, Params, ParamsError,
-        ResultEstimate, RunOptions, RunResult, Runner, RunnerDurationConfig, ScalarEstimate,
-        Scheduling, Task, TaskMaker, TaskResult,
+        task_path, BinnedEstimate, CheckpointState, CompactAccumulator, Context, DeterministicRng,
+        Estimate, Evaluator, GenericJobError, Job, JobAssignment, MonteCarlo, Params, ParamsError,
+        RestoredState, ResultEstimate, RunOptions, RunResult, Runner, RunnerDurationConfig,
+        ScalarEstimate, Scheduling, Task, TaskMaker, TaskResult,
     };
 }

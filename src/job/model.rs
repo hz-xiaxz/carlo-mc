@@ -1,6 +1,11 @@
+use super::checkpoint::{
+    decode_rng_position, encode_rng_position, read_checkpoint as read_default_checkpoint,
+    write_checkpoint as write_default_checkpoint, Checkpoint, CheckpointState, RestoredState,
+    CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
+};
 use crate::{default_estimates, Context, GenericJobError, ResultEstimate};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{collections::BTreeMap, error::Error};
+use std::{collections::BTreeMap, error::Error, path::Path};
 
 /// One independent Monte Carlo run: a parameter point plus its execution settings.
 ///
@@ -199,6 +204,76 @@ pub trait MonteCarlo: Sized + Serialize + DeserializeOwned {
             .into_iter()
             .map(|(name, estimate)| (name, Self::Estimate::from(estimate)))
             .collect())
+    }
+
+    /// Writes a checkpoint for this model at `path`.
+    ///
+    /// `state` carries everything the runner owns (task, assignment, RNG position, sweep
+    /// progress, and observable bins). The model is responsible for persisting its own state
+    /// (via `&self`) together with `state`, in whatever on-disk format it needs. This is what
+    /// lets a model keep a fully custom checkpoint layout that the framework does not dictate.
+    ///
+    /// The default implementation uses the framework's JSON-model HDF5 codec: the model is
+    /// serialized to JSON and stored under `metadata/model`, with `state` spread across the
+    /// standard `assignment`/`progress`/`state`/`observables` groups.
+    fn write_checkpoint(
+        &self,
+        state: &CheckpointState<Self::Parameters>,
+        path: &Path,
+    ) -> Result<(), GenericJobError> {
+        let model =
+            serde_json::to_value(self).map_err(|error| GenericJobError::json(Some(path), error))?;
+        let checkpoint = Checkpoint {
+            schema_version: CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
+            rank: state.rank,
+            world_size: state.world_size,
+            job_name: state.job_name.clone(),
+            task: state.task.clone(),
+            task_index: state.task_index,
+            model,
+            rng_position_words: encode_rng_position(state.rng_position),
+            thermalization_sweeps: state.thermalization_sweeps,
+            measurement_sweeps: state.measurement_sweeps,
+            observables: state.observables.clone(),
+        };
+        write_default_checkpoint(path, &checkpoint)
+    }
+
+    /// Restores a model and the runner state from a checkpoint previously written by
+    /// [`MonteCarlo::write_checkpoint`].
+    ///
+    /// This is an associated function (not a method) because it reconstructs the model. The
+    /// returned [`RestoredState`] carries both the reconstructed model and the runner-owned
+    /// fields; the runner validates those fields against the run being resumed before
+    /// continuing the sweep loop.
+    ///
+    /// The default implementation reads the framework's JSON-model HDF5 codec. A model that
+    /// overrides [`MonteCarlo::write_checkpoint`] with a custom format must override this
+    /// method symmetrically.
+    fn read_checkpoint(path: &Path) -> Result<RestoredState<Self>, GenericJobError> {
+        let checkpoint: Checkpoint<Self::Parameters> = read_default_checkpoint(path)?;
+        let model: Self = serde_json::from_value(checkpoint.model.clone())
+            .map_err(|error| GenericJobError::json(Some(path), error))?;
+        let restored_model = serde_json::to_value(&model)
+            .map_err(|error| GenericJobError::json(Some(path), error))?;
+        if restored_model != checkpoint.model {
+            return Err(GenericJobError::CheckpointMismatch {
+                path: path.into(),
+                task: checkpoint.task.name.clone(),
+            });
+        }
+        Ok(RestoredState {
+            model,
+            task: checkpoint.task,
+            rank: checkpoint.rank,
+            world_size: checkpoint.world_size,
+            job_name: checkpoint.job_name,
+            task_index: checkpoint.task_index,
+            rng_position: decode_rng_position(checkpoint.rng_position_words),
+            thermalization_sweeps: checkpoint.thermalization_sweeps,
+            measurement_sweeps: checkpoint.measurement_sweeps,
+            observables: checkpoint.observables,
+        })
     }
 }
 #[cfg(test)]

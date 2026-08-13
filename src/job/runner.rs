@@ -1,5 +1,5 @@
 use super::{
-    checkpoint::{checkpoint_path, write_checkpoint},
+    checkpoint::checkpoint_path,
     paths::{
         atomic_write, ensure_safe_directory, ensure_safe_file_path, ensure_safe_read_file_path,
         exclusive_write, task_path,
@@ -331,7 +331,7 @@ impl<M: MonteCarlo> Runner<M> {
                     sweep_budget: budget,
                     deadline,
                 },
-                |checkpoint, used, final_checkpoint| {
+                |state, model, used, final_checkpoint| {
                     if let Some(claim) = claim.as_ref() {
                         self.renew_claim(claim)?;
                     }
@@ -340,7 +340,7 @@ impl<M: MonteCarlo> Runner<M> {
                     let sweep_due =
                         o.checkpoint_interval > 0 && used > 0 && used % o.checkpoint_interval == 0;
                     if (final_checkpoint || sweep_due || duration_due) && cp.is_some() {
-                        write_checkpoint(cp.as_deref().unwrap(), checkpoint)?;
+                        model.write_checkpoint(state, cp.as_deref().unwrap())?;
                         last_checkpoint = Instant::now();
                     }
                     Ok(())
@@ -726,7 +726,8 @@ fn validate<M: MonteCarlo>(j: &Job<M>, o: &RunOptions) -> Result<(), GenericJobE
 #[cfg(test)]
 mod tests {
     use super::super::checkpoint::{
-        encode_rng_position, read_checkpoint, Checkpoint, CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
+        encode_rng_position, read_checkpoint, write_checkpoint, Checkpoint,
+        CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
     };
     use super::super::paths::{absolute_temp_dir, temp_dir};
     use super::*;
