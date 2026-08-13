@@ -5,7 +5,7 @@ use super::{
         exclusive_write, task_path,
     },
     simulation::{run_task, TaskRuntime},
-    validate_safe_component, Job, JobAssignment, JobResult, MonteCarlo, Task, TaskResult,
+    validate_safe_component, Estimate, Job, JobAssignment, JobResult, MonteCarlo, Task, TaskResult,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -42,10 +42,13 @@ pub struct RunOptions {
     pub checkpoint_interval_time: Option<Duration>,
 }
 /// The result of a single [`Runner::run`] invocation.
+///
+/// The estimate type `E` defaults to [`Estimate`]; any [`ResultEstimate`](crate::ResultEstimate)
+/// implementation can be used instead.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RunResult<P> {
+pub struct RunResult<P, E = Estimate> {
     /// The per-rank result for this run.
-    pub result: JobResult<P>,
+    pub result: JobResult<P, E>,
     /// The output path that was written, if any.
     pub output_path: Option<PathBuf>,
     /// Checkpoint files written during this run.
@@ -283,7 +286,7 @@ impl<M: MonteCarlo> Runner<M> {
         &self,
         job: &Job<M>,
         o: &RunOptions,
-    ) -> Result<RunResult<M::Parameters>, GenericJobError> {
+    ) -> Result<RunResult<M::Parameters, M::Estimate>, GenericJobError> {
         validate(job, o)?;
         let a = o.assignment.unwrap_or_else(JobAssignment::single);
         let started = Instant::now();
@@ -492,7 +495,7 @@ impl<M: MonteCarlo> Runner<M> {
         job: &Job<M>,
         o: &RunOptions,
         claim: &OwnedClaim,
-        r: &TaskResult<M::Parameters>,
+        r: &TaskResult<M::Parameters, M::Estimate>,
     ) -> Result<(), GenericJobError> {
         self.renew_claim(claim)?;
         let d = o.checkpoint_dir.as_ref().unwrap();
@@ -743,6 +746,7 @@ mod tests {
     impl MonteCarlo for M {
         type Parameters = P;
         type Error = Infallible;
+        type Estimate = crate::Estimate;
         fn new(_: &P) -> Result<Self, Self::Error> {
             Ok(Self { v: 0. })
         }
@@ -771,6 +775,7 @@ mod tests {
     impl MonteCarlo for CheckpointProbeModel {
         type Parameters = CheckpointProbe;
         type Error = Infallible;
+        type Estimate = crate::Estimate;
         fn new(parameters: &CheckpointProbe) -> Result<Self, Self::Error> {
             Ok(Self {
                 sweeps: 0,

@@ -1,5 +1,6 @@
 mod checkpoint;
 pub mod config;
+mod estimate;
 pub mod model;
 mod paths;
 mod results;
@@ -11,6 +12,7 @@ use std::{error::Error, fmt, marker::PhantomData};
 
 pub use checkpoint::*;
 pub use config::*;
+pub use estimate::*;
 pub use model::{MonteCarlo, Task, TaskMaker};
 pub use paths::*;
 pub use results::*;
@@ -141,6 +143,7 @@ mod tests {
     impl MonteCarlo for M {
         type Parameters = P;
         type Error = Infallible;
+        type Estimate = crate::Estimate;
         fn new(_: &P) -> Result<Self, Self::Error> {
             Ok(M)
         }

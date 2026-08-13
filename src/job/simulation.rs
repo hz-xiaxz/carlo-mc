@@ -3,7 +3,7 @@ use super::{
         decode_rng_position, encode_rng_position, read_checkpoint, Checkpoint,
         CHECKPOINT_PAYLOAD_SCHEMA_VERSION,
     },
-    GenericJobError, JobAssignment, MonteCarlo, ScalarEstimate, Task, TaskResult,
+    GenericJobError, JobAssignment, MonteCarlo, Task, TaskResult,
 };
 use rand::{SeedableRng, TryRng};
 use serde::{Deserialize, Serialize};
@@ -75,9 +75,14 @@ impl TryRng for DeterministicRng {
         Ok(())
     }
 }
+/// Accumulates raw samples for one observable until they form completed internal bins.
+///
+/// `internal_bins` holds the completed bin averages, `pending_sum`/`pending_count` track the
+/// partially filled bin, `total_count` is the number of samples accepted so far, and
+/// `binsize` is the fixed number of samples per internal bin.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CompactAccumulator {
+pub struct CompactAccumulator {
     pub internal_bins: Vec<f64>,
     pub pending_sum: f64,
     pub pending_count: usize,
@@ -197,6 +202,17 @@ impl Context {
     pub fn bin_length(&self, name: &str) -> Option<usize> {
         self.observables.get(name).map(|a| a.binsize)
     }
+
+    /// Iterates over all measured observables and their accumulators.
+    ///
+    /// This is the raw view used by [`MonteCarlo::finalize_estimates`](crate::MonteCarlo::finalize_estimates)
+    /// when a model wants to post-process completed bins itself (for example to derive
+    /// additional observables through jackknife).
+    pub fn observables(&self) -> impl Iterator<Item = (&str, &CompactAccumulator)> {
+        self.observables
+            .iter()
+            .map(|(name, accumulator)| (name.as_str(), accumulator))
+    }
 }
 
 pub(crate) struct TaskRuntime<'a> {
@@ -210,11 +226,19 @@ pub(crate) struct TaskRuntime<'a> {
     pub deadline: Option<Instant>,
 }
 
+/// Return type of [`run_task`]: the task's result and the number of sweeps it used.
+type RunTaskResult<M> = Result<
+    (
+        TaskResult<<M as MonteCarlo>::Parameters, <M as MonteCarlo>::Estimate>,
+        usize,
+    ),
+    GenericJobError,
+>;
 pub(crate) fn run_task<M, F>(
     task: &Task<M::Parameters>,
     runtime: TaskRuntime<'_>,
     mut maintain: F,
-) -> Result<(TaskResult<M::Parameters>, usize), GenericJobError>
+) -> RunTaskResult<M>
 where
     M: MonteCarlo,
     F: FnMut(&Checkpoint<M::Parameters>, usize, bool) -> Result<(), GenericJobError>,
@@ -347,7 +371,25 @@ where
     let completed =
         thermalization_sweeps == task.thermalization && measurement_sweeps == task.sweeps;
     let observables = if completed {
-        estimates(task, &context)?
+        for (name, accumulator) in &context.observables {
+            if accumulator.internal_bins.is_empty() {
+                return Err(GenericJobError::InsufficientSamples {
+                    task: task.name.clone(),
+                    observable: name.clone(),
+                });
+            }
+        }
+        let raw_bins = context
+            .observables
+            .iter()
+            .map(|(name, accumulator)| (name.clone(), accumulator.internal_bins.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let bin_lengths = context
+            .observables
+            .iter()
+            .map(|(name, accumulator)| (name.clone(), accumulator.binsize))
+            .collect::<BTreeMap<_, _>>();
+        model.finalize_estimates(&task.parameters, &raw_bins, &bin_lengths)?
     } else {
         BTreeMap::new()
     };
@@ -432,50 +474,6 @@ fn validate_checkpoint_state<P>(
         }
     }
     Ok(())
-}
-
-fn estimates<P>(
-    task: &Task<P>,
-    context: &Context,
-) -> Result<BTreeMap<String, ScalarEstimate>, GenericJobError> {
-    context
-        .observables
-        .iter()
-        .map(|(name, accumulator)| {
-            if accumulator.internal_bins.is_empty() {
-                return Err(GenericJobError::InsufficientSamples {
-                    task: task.name.clone(),
-                    observable: name.clone(),
-                });
-            }
-            let rebin_length = super::results::rebin_length(accumulator.internal_bins.len());
-            let bins = accumulator
-                .internal_bins
-                .chunks_exact(rebin_length)
-                .map(|values| values.iter().sum::<f64>() / values.len() as f64)
-                .collect::<Vec<_>>();
-            let mean = bins.iter().sum::<f64>() / bins.len() as f64;
-            let stderr = if bins.len() > 1 {
-                (bins.iter().map(|value| (value - mean).powi(2)).sum::<f64>()
-                    / (bins.len() - 1) as f64)
-                    .sqrt()
-                    / (bins.len() as f64).sqrt()
-            } else {
-                f64::NAN
-            };
-            Ok((
-                name.clone(),
-                ScalarEstimate {
-                    mean,
-                    stderr,
-                    internal_bins: accumulator.internal_bins.len(),
-                    rebin_length,
-                    rebin_count: bins.len(),
-                    bin_length: accumulator.binsize,
-                },
-            ))
-        })
-        .collect()
 }
 
 #[cfg(test)]

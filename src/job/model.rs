@@ -1,6 +1,6 @@
-use crate::Context;
+use crate::{default_estimates, Context, GenericJobError, ResultEstimate};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::error::Error;
+use std::{collections::BTreeMap, error::Error};
 
 /// One independent Monte Carlo run: a parameter point plus its execution settings.
 ///
@@ -147,6 +147,13 @@ impl<P: Clone> TaskMaker<P> {
 pub trait MonteCarlo: Sized + Serialize + DeserializeOwned {
     type Parameters: Clone + PartialEq + Serialize + DeserializeOwned;
     type Error: Error + Send + Sync + 'static;
+    /// The per-observable estimate type produced by [`MonteCarlo::finalize_estimates`].
+    ///
+    /// The default [`crate::Estimate`] is a fully featured binned estimate with error,
+    /// covariance, and autocorrelation time. A model can substitute its own serializable
+    /// estimate type, as long as it is constructible from the default [`crate::Estimate`]
+    /// (which keeps the framework's default finalization path usable).
+    type Estimate: ResultEstimate + From<crate::Estimate>;
     /// Constructs the model for the given task parameters.
     fn new(parameters: &Self::Parameters) -> Result<Self, Self::Error>;
     /// Performs one-time initialization before the first sweep.
@@ -168,6 +175,30 @@ pub trait MonteCarlo: Sized + Serialize + DeserializeOwned {
     /// config-driven grid can rely on [`TaskMaker`] instead.
     fn build_tasks(_config: &crate::Params) -> Result<Vec<Task<Self::Parameters>>, Self::Error> {
         Ok(Vec::new())
+    }
+
+    /// Converts measured raw bins into final per-observable estimates.
+    ///
+    /// `raw_bins` maps each observable name to its completed internal-bin averages, and
+    /// `bin_lengths` maps the same name to the number of raw samples per internal bin. The
+    /// runner collects these from every [`Context::measure`] call and invokes this hook once
+    /// per completed task, after [`MonteCarlo::measure`] has finished.
+    ///
+    /// The default implementation rebins each series with Carlo-style rebinning and wraps the
+    /// result in [`Self::Estimate`]. Models that compute *derived* observables (for
+    /// example ratios or nonlinear functions of measured ones, via
+    /// [`Evaluator`](crate::Evaluator) jackknife) should override this method, using
+    /// [`default_estimates`] as a starting point for the directly measured observables.
+    fn finalize_estimates(
+        &self,
+        _parameters: &Self::Parameters,
+        raw_bins: &BTreeMap<String, Vec<f64>>,
+        bin_lengths: &BTreeMap<String, usize>,
+    ) -> Result<BTreeMap<String, Self::Estimate>, GenericJobError> {
+        Ok(default_estimates(raw_bins, bin_lengths)
+            .into_iter()
+            .map(|(name, estimate)| (name, Self::Estimate::from(estimate)))
+            .collect())
     }
 }
 #[cfg(test)]

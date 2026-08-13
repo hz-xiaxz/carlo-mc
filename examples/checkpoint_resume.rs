@@ -23,6 +23,7 @@ struct Pi {
 impl MonteCarlo for Pi {
     type Parameters = ();
     type Error = Infallible;
+    type Estimate = carlo_mc::Estimate;
 
     fn new(_: &()) -> Result<Self, Self::Error> {
         Ok(Pi {

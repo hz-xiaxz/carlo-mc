@@ -1,11 +1,11 @@
 use super::{
     checkpoint::{
-        add_bytes, add_f64, add_u64, add_u8, add_utf8, exact_group, exact_root_group, finish_hdf5,
-        group, numbered_groups, open_hdf5, read_f64_scalar, read_json, read_u64_scalar,
-        read_u8_scalar, read_usize, read_utf8, schema, set_root_attrs, to_u64,
+        add_bytes, add_u64, add_u8, add_utf8, exact_group, exact_root_group, finish_hdf5, group,
+        numbered_groups, open_hdf5, read_json, read_u64_scalar, read_u8_scalar, read_usize,
+        read_utf8, schema, set_root_attrs, to_u64,
     },
     paths::{atomic_write, ensure_safe_read_file_path},
-    GenericJobError, Job, MonteCarlo, Scheduling, Task,
+    Estimate, GenericJobError, Job, MonteCarlo, ResultEstimate, Scheduling, Task,
 };
 use hdf5_pure::FileBuilder;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -34,12 +34,16 @@ pub struct ScalarEstimate {
     pub bin_length: usize,
 }
 /// The measured result of a single [`Task`].
+///
+/// The estimate type `E` defaults to [`Estimate`] (a fully featured binned estimate with
+/// error, covariance, and autocorrelation time); any [`ResultEstimate`] implementation can
+/// be used instead.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TaskResult<P> {
+pub struct TaskResult<P, E = Estimate> {
     pub task_index: usize,
     pub task: Task<P>,
-    pub observables: BTreeMap<String, ScalarEstimate>,
+    pub observables: BTreeMap<String, E>,
     pub thermalization_sweeps: usize,
     pub measurement_sweeps: usize,
     /// Whether the task ran to completion (full thermalization and measurement).
@@ -48,13 +52,13 @@ pub struct TaskResult<P> {
 /// One rank's contribution to a job, serializable to JSON or HDF5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobResult<P> {
+pub struct JobResult<P, E = Estimate> {
     pub job_name: String,
     pub rank: usize,
     pub world_size: usize,
-    pub tasks: Vec<TaskResult<P>>,
+    pub tasks: Vec<TaskResult<P, E>>,
 }
-impl<P: Serialize + DeserializeOwned> JobResult<P> {
+impl<P: Serialize + DeserializeOwned, E: ResultEstimate> JobResult<P, E> {
     /// Atomically writes this result as pretty-printed JSON.
     pub fn write_json(&self, path: &Path) -> Result<(), GenericJobError> {
         validate_result_schema(path, self)?;
@@ -129,28 +133,9 @@ impl<P: Serialize + DeserializeOwned> JobResult<P> {
             for (index, (name, estimate)) in result.observables.iter().enumerate() {
                 let mut observable = observables.create_group(&format!("observable{index:04}"));
                 add_utf8(path, &mut observable, "name", name)?;
-                add_f64(&mut observable, "mean", estimate.mean);
-                add_f64(&mut observable, "stderr", estimate.stderr);
-                add_u64(
-                    &mut observable,
-                    "internal_bins",
-                    to_u64(path, estimate.internal_bins)?,
-                );
-                add_u64(
-                    &mut observable,
-                    "rebin_length",
-                    to_u64(path, estimate.rebin_length)?,
-                );
-                add_u64(
-                    &mut observable,
-                    "rebin_count",
-                    to_u64(path, estimate.rebin_count)?,
-                );
-                add_u64(
-                    &mut observable,
-                    "bin_length",
-                    to_u64(path, estimate.bin_length)?,
-                );
+                let estimate_bytes = serde_json::to_vec(estimate)
+                    .map_err(|error| GenericJobError::json(Some(path), error))?;
+                add_bytes(path, &mut observable, "estimate", &estimate_bytes)?;
                 observables.add_group(observable.finish());
             }
             result_group.add_group(observables.finish());
@@ -232,38 +217,11 @@ impl<P: Serialize + DeserializeOwned> JobResult<P> {
                 exact_group(
                     path,
                     group(path, &file, &observable_base)?,
-                    &[
-                        "bin_length",
-                        "internal_bins",
-                        "mean",
-                        "name",
-                        "rebin_count",
-                        "rebin_length",
-                        "stderr",
-                    ],
+                    &["estimate", "name"],
                     &[],
                 )?;
                 let name = read_utf8(path, &file, &format!("{observable_base}/name"))?;
-                let estimate = ScalarEstimate {
-                    mean: read_f64_scalar(path, &file, &format!("{observable_base}/mean"))?,
-                    stderr: read_f64_scalar(path, &file, &format!("{observable_base}/stderr"))?,
-                    internal_bins: read_usize(
-                        path,
-                        &file,
-                        &format!("{observable_base}/internal_bins"),
-                    )?,
-                    rebin_length: read_usize(
-                        path,
-                        &file,
-                        &format!("{observable_base}/rebin_length"),
-                    )?,
-                    rebin_count: read_usize(
-                        path,
-                        &file,
-                        &format!("{observable_base}/rebin_count"),
-                    )?,
-                    bin_length: read_usize(path, &file, &format!("{observable_base}/bin_length"))?,
-                };
+                let estimate: E = read_json(path, &file, &format!("{observable_base}/estimate"))?;
                 if observables.insert(name, estimate).is_some() {
                     return Err(schema(path, "duplicate result observable name"));
                 }
@@ -320,25 +278,30 @@ fn parse_indexed_group(path: &Path, name: &str, prefix: &str) -> Result<usize, G
         .map_err(|_| schema(path, "invalid four-digit result group index"))
 }
 
-fn valid_estimate(estimate: &ScalarEstimate) -> bool {
-    if !estimate.mean.is_finite()
-        || estimate.internal_bins == 0
-        || estimate.rebin_length == 0
-        || estimate.rebin_count == 0
-        || estimate.bin_length == 0
-        || estimate.rebin_length != rebin_length(estimate.internal_bins)
-        || estimate.rebin_count != estimate.internal_bins / estimate.rebin_length
-    {
-        return false;
-    }
-    if estimate.rebin_count == 1 {
-        estimate.stderr.is_nan()
-    } else {
-        estimate.stderr.is_finite() && estimate.stderr >= 0.0
+impl ResultEstimate for ScalarEstimate {
+    fn valid(&self) -> bool {
+        if !self.mean.is_finite()
+            || self.internal_bins == 0
+            || self.rebin_length == 0
+            || self.rebin_count == 0
+            || self.bin_length == 0
+            || self.rebin_length != rebin_length(self.internal_bins)
+            || self.rebin_count != self.internal_bins / self.rebin_length
+        {
+            return false;
+        }
+        if self.rebin_count == 1 {
+            self.stderr.is_nan()
+        } else {
+            self.stderr.is_finite() && self.stderr >= 0.0
+        }
     }
 }
 
-fn validate_result_schema<P>(path: &Path, result: &JobResult<P>) -> Result<(), GenericJobError> {
+fn validate_result_schema<P, E: ResultEstimate>(
+    path: &Path,
+    result: &JobResult<P, E>,
+) -> Result<(), GenericJobError> {
     if result.world_size == 0 || result.rank >= result.world_size {
         return Err(GenericJobError::Schema {
             path: path.into(),
@@ -351,10 +314,7 @@ fn validate_result_schema<P>(path: &Path, result: &JobResult<P>) -> Result<(), G
                 && task.measurement_sweeps == task.task.sweeps)
             || task.thermalization_sweeps > task.task.thermalization
             || task.measurement_sweeps > task.task.sweeps
-            || task
-                .observables
-                .values()
-                .any(|estimate| !valid_estimate(estimate))
+            || task.observables.values().any(|estimate| !estimate.valid())
         {
             return Err(GenericJobError::Schema {
                 path: path.into(),
@@ -367,25 +327,25 @@ fn validate_result_schema<P>(path: &Path, result: &JobResult<P>) -> Result<(), G
 /// Merges per-rank results from static scheduling into a single result.
 pub fn merge_results<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     merge_results_with_scheduling(job, parts, Scheduling::Static)
 }
 
 /// Merges per-rank results from dynamic scheduling into a single result.
 pub fn merge_dynamic_results<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     merge_results_with_scheduling(job, parts, Scheduling::Dynamic)
 }
 
 /// Merges static-scheduling results and atomically writes the output as JSON.
 pub fn merge_results_to_json<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
     output: &Path,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     merge_results_to(
         job,
         parts,
@@ -398,9 +358,9 @@ pub fn merge_results_to_json<M: MonteCarlo>(
 /// Merges static-scheduling results and atomically writes the output as HDF5.
 pub fn merge_results_to_hdf5<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
     output: &Path,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     merge_results_to(
         job,
         parts,
@@ -413,9 +373,9 @@ pub fn merge_results_to_hdf5<M: MonteCarlo>(
 /// Merges dynamic-scheduling results and atomically writes the output as JSON.
 pub fn merge_dynamic_results_to_json<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
     output: &Path,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     merge_results_to(
         job,
         parts,
@@ -428,9 +388,9 @@ pub fn merge_dynamic_results_to_json<M: MonteCarlo>(
 /// Merges dynamic-scheduling results and atomically writes the output as HDF5.
 pub fn merge_dynamic_results_to_hdf5<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
     output: &Path,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     merge_results_to(
         job,
         parts,
@@ -440,13 +400,18 @@ pub fn merge_dynamic_results_to_hdf5<M: MonteCarlo>(
     )
 }
 
+type ResultWriter<M> = fn(
+    &JobResult<<M as MonteCarlo>::Parameters, <M as MonteCarlo>::Estimate>,
+    &Path,
+) -> Result<(), GenericJobError>;
+
 fn merge_results_to<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
     scheduling: Scheduling,
     output: &Path,
-    write: fn(&JobResult<M::Parameters>, &Path) -> Result<(), GenericJobError>,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+    write: ResultWriter<M>,
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     let result = merge_results_with_scheduling(job, parts, scheduling)?;
     write(&result, output)?;
     Ok(result)
@@ -458,9 +423,9 @@ fn merge_results_to<M: MonteCarlo>(
 /// be completed, correctly owned, and consistent with the shared `job` definition.
 pub fn merge_results_with_scheduling<M: MonteCarlo>(
     job: &Job<M>,
-    parts: Vec<JobResult<M::Parameters>>,
+    parts: Vec<JobResult<M::Parameters, M::Estimate>>,
     scheduling: Scheduling,
-) -> Result<JobResult<M::Parameters>, GenericJobError> {
+) -> Result<JobResult<M::Parameters, M::Estimate>, GenericJobError> {
     if parts.is_empty() {
         return Err(GenericJobError::Merge("no rank results"));
     }
@@ -522,6 +487,7 @@ mod tests {
     impl MonteCarlo for M {
         type Parameters = P;
         type Error = Infallible;
+        type Estimate = crate::Estimate;
         fn new(_: &P) -> Result<Self, Self::Error> {
             Ok(Self)
         }
@@ -548,14 +514,18 @@ mod tests {
         }
     }
 
-    fn estimate() -> ScalarEstimate {
-        ScalarEstimate {
+    fn estimate() -> Estimate {
+        Estimate {
             mean: 1.0,
             stderr: 0.25,
-            internal_bins: 2,
-            rebin_length: 1,
-            rebin_count: 2,
+            error: 0.25,
+            covariance: None,
+            autocorr_time: 0.0,
+            bins: 2,
             bin_length: 1,
+            rebin_len: 1,
+            rebin_count: 2,
+            internal_bin_len: 1,
         }
     }
 
@@ -679,15 +649,7 @@ mod tests {
                 .unwrap()
                 .datasets()
                 .unwrap(),
-            [
-                "name",
-                "mean",
-                "stderr",
-                "internal_bins",
-                "rebin_length",
-                "rebin_count",
-                "bin_length"
-            ]
+            ["name", "estimate"]
         );
         assert_eq!(
             file.dataset("tasks/task0000/completed")
@@ -703,12 +665,13 @@ mod tests {
                 .unwrap(),
             hdf5_pure::DType::U8
         );
-        assert!(file
-            .dataset("tasks/task0000/observables/observable0000/mean")
-            .unwrap()
-            .shape()
-            .unwrap()
-            .is_empty());
+        assert_eq!(
+            file.dataset("tasks/task0000/observables/observable0000/estimate")
+                .unwrap()
+                .dtype()
+                .unwrap(),
+            hdf5_pure::DType::U8
+        );
         assert_eq!(JobResult::read_hdf5(&path).unwrap(), result);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -771,13 +734,13 @@ mod tests {
         cases.push(vec![excessive_count, rank_one.clone()]);
 
         for mutate in [
-            |estimate: &mut ScalarEstimate| estimate.mean = f64::INFINITY,
-            |estimate: &mut ScalarEstimate| estimate.stderr = f64::NAN,
-            |estimate: &mut ScalarEstimate| estimate.stderr = -0.1,
-            |estimate: &mut ScalarEstimate| estimate.internal_bins = 3,
-            |estimate: &mut ScalarEstimate| estimate.rebin_length = 2,
-            |estimate: &mut ScalarEstimate| estimate.rebin_count = 1,
-            |estimate: &mut ScalarEstimate| estimate.bin_length = 0,
+            |estimate: &mut Estimate| estimate.mean = f64::INFINITY,
+            |estimate: &mut Estimate| estimate.stderr = f64::NAN,
+            |estimate: &mut Estimate| estimate.stderr = -0.1,
+            |estimate: &mut Estimate| estimate.bins = 3,
+            |estimate: &mut Estimate| estimate.rebin_count = 1,
+            |estimate: &mut Estimate| estimate.rebin_len = 0,
+            |estimate: &mut Estimate| estimate.internal_bin_len = 0,
         ] {
             let mut malicious = rank_zero.clone();
             malicious.tasks[0]
@@ -797,13 +760,17 @@ mod tests {
         let mut one_bin = rank_zero;
         one_bin.tasks[0].observables.insert(
             "value".into(),
-            ScalarEstimate {
+            Estimate {
                 mean: 1.0,
                 stderr: f64::NAN,
-                internal_bins: 1,
-                rebin_length: 1,
-                rebin_count: 1,
+                error: f64::NAN,
+                covariance: None,
+                autocorr_time: 0.0,
+                bins: 1,
                 bin_length: 1,
+                rebin_len: 1,
+                rebin_count: 1,
+                internal_bin_len: 1,
             },
         );
         assert!(merge_results(&job, vec![one_bin, rank_one]).is_ok());

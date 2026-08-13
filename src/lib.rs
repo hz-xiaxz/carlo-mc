@@ -28,6 +28,7 @@
 //! impl MonteCarlo for Pi {
 //!     type Parameters = Params;
 //!     type Error = Infallible;
+//!     type Estimate = carlo_mc::Estimate;
 //!
 //!     fn new(_: &Params) -> Result<Self, Self::Error> {
 //!         Ok(Pi { inside: 0, total: 0 })
@@ -90,8 +91,9 @@ pub mod prelude {
         checkpoint_path, dump_path, measurement_path, merge_dynamic_results,
         merge_dynamic_results_to_hdf5, merge_dynamic_results_to_json, merge_results,
         merge_results_to_hdf5, merge_results_to_json, merge_results_with_scheduling, result_path,
-        task_path, Context, DeterministicRng, GenericJobError, Job, JobAssignment, MonteCarlo,
-        Params, ParamsError, RunOptions, RunResult, Runner, RunnerDurationConfig, ScalarEstimate,
+        task_path, BinnedEstimate, CompactAccumulator, Context, DeterministicRng, Estimate,
+        Evaluator, GenericJobError, Job, JobAssignment, MonteCarlo, Params, ParamsError,
+        ResultEstimate, RunOptions, RunResult, Runner, RunnerDurationConfig, ScalarEstimate,
         Scheduling, Task, TaskMaker, TaskResult,
     };
 }
