@@ -251,18 +251,22 @@ pub fn default_estimates(
 /// implementation constructs one of these from the measured bin averages and then
 /// registers nonlinear observables (for example
 /// `Magnetization = sqrt(MagnetizationSquared)`) in terms of measured ingredients.
-/// The evaluator applies each registration to produce a jackknifed [`Estimate`].
-pub struct Evaluator<'a> {
+/// The evaluator applies each registration to produce a jackknifed estimate of type `E`
+/// (defaulting to [`Estimate`]).
+pub struct Evaluator<'a, E = Estimate> {
     binned: BTreeMap<String, BinnedEstimate>,
-    estimates: &'a mut BTreeMap<String, Estimate>,
+    estimates: &'a mut BTreeMap<String, E>,
 }
 
-impl<'a> Evaluator<'a> {
+impl<'a, E> Evaluator<'a, E>
+where
+    E: ResultEstimate + From<Estimate>,
+{
     /// Creates an evaluator from measured [`BinnedEstimate`]s and the estimate map
     /// that will receive the derived observables.
     pub fn new(
         binned: BTreeMap<String, BinnedEstimate>,
-        estimates: &'a mut BTreeMap<String, Estimate>,
+        estimates: &'a mut BTreeMap<String, E>,
     ) -> Self {
         Self { binned, estimates }
     }
@@ -276,7 +280,7 @@ impl<'a> Evaluator<'a> {
         F: Fn([f64; N]) -> f64,
     {
         if let Some(estimate) = evaluate(&self.binned, ingredients, evaluation) {
-            self.estimates.insert(name.to_string(), estimate);
+            self.estimates.insert(name.to_string(), E::from(estimate));
         }
     }
 }
